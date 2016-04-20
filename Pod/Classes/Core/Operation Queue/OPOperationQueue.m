@@ -21,9 +21,11 @@
 
 #import "OPOperationQueue.h"
 #import "OPOperation.h"
+#import "OPBlockOperation.h"
 #import "OPBlockObserver.h"
 #import "OPExclusivityController.h"
 #import "OPOperationCondition.h"
+#import "OPOperationConditionEvaluator.h"
 
 
 @implementation OPOperationQueue
@@ -75,41 +77,90 @@
                                                                            }];
 
         [opOperation addObserver:observer];
-
-        // Extract any dependencies needed by this operation
-        NSMutableArray *dependencies = [[NSMutableArray alloc] init];
-        for (id <OPOperationCondition>condition in [opOperation conditions]) {
-            NSOperation *dependency = [condition dependencyForOperation:opOperation];
-            if (dependency) {
-                [dependencies addObject:dependency];
+        
+        /*
+         Add conditions evaluation operation.
+         
+         Previously condition evaluation would happen on Operation level.
+         However due to bug discovered in NSOperation we cannot safely manipulate NSOperation.isReady.
+         
+         Therefore we have to wrap condition evalutor into operation and make it dependency for main operation.
+         Evaluation errors are then passed back to main operation before its execution.
+         
+         Relevant discussions:
+         
+         1. https://github.com/danthorpe/Operations/issues/175
+         2. https://github.com/Kabal/Operative/issues/51
+         
+         */
+        
+        if(opOperation.conditions.count)
+        {
+            __weak OPOperation *weakOperation = opOperation;
+            
+            OPBlockOperation *evaluationOperation = [[OPBlockOperation alloc] initWithBlock:^(void (^completion)(void)) {
+                __strong OPOperation *strongOperation = weakOperation;
+                
+                [OPOperationConditionEvaluator evaluateConditions:[strongOperation conditions] operation:strongOperation completion:^(NSArray *failures) {
+                    [strongOperation finishedEvaluationWithErrors:failures];
+                    
+                    completion();
+                }];
+            }];
+            
+            evaluationOperation.qualityOfService = opOperation.qualityOfService;
+            evaluationOperation.name = [NSString stringWithFormat:@"Condition evaluator for %@", [opOperation description]];
+            
+            // Extract any dependencies needed by this operation
+            NSMutableArray *dependencies = [[NSMutableArray alloc] init];
+            for (id <OPOperationCondition> condition in [opOperation conditions]) {
+                NSOperation *dependency = [condition dependencyForOperation:opOperation];
+                if (dependency) {
+                    [dependencies addObject:dependency];
+                    
+                    [evaluationOperation addDependency:dependency];
+                }
             }
-        }
-
-        for (NSOperation *dependency in dependencies) {
-            [opOperation addDependency:dependency];
-            [self addOperation:dependency];
-        }
-
-        // With condition dependencies added, we can now see if this needs
-        // dependencies to enforce mutual exclusivity.
-        NSMutableArray *concurrencyCategories = [[NSMutableArray alloc] init];
-        for (id <OPOperationCondition>condition in [opOperation conditions]) {
-            if (condition.isMutuallyExclusive) {
-                [concurrencyCategories addObject:condition.name];
+            
+            // add evaluator into dependencies
+            [dependencies addObject:evaluationOperation];
+            
+            // operation should depend on evaluator
+            [opOperation addDependency:evaluationOperation];
+            
+            // With condition dependencies added, we can now see if this needs
+            // dependencies to enforce mutual exclusivity.
+            NSMutableArray *concurrencyCategories = [[NSMutableArray alloc] init];
+            for (id<OPOperationCondition> condition in [opOperation conditions]) {
+                if (condition.isMutuallyExclusive) {
+                    [concurrencyCategories addObject:condition.name];
+                }
             }
-        }
-
-        if ([concurrencyCategories count] > 0) {
-            // Set up the mutual exclusivity dependencies.
-            OPExclusivityController *exclusivityController = [OPExclusivityController sharedExclusivityController];
-            [exclusivityController addOperation:opOperation categories:concurrencyCategories];
-
-            OPBlockObserver *blockObserver = [[OPBlockObserver alloc] initWithStartHandler:nil
-                                                                            produceHandler:nil
-                                                                             finishHandler:^(OPOperation *anOperation, __unused NSArray *errors) {
-                                                                                 [exclusivityController removeOperation:anOperation categories:concurrencyCategories];
-                                                                             }];
-            [opOperation addObserver:blockObserver];
+            
+            if ([concurrencyCategories count] > 0)
+            {
+                // Set up the mutual exclusivity dependencies.
+                OPExclusivityController *exclusivityController = [OPExclusivityController sharedExclusivityController];
+                
+                NSSet *previousMutuallyExclusiveOperations = [exclusivityController addOperation:opOperation categories:concurrencyCategories];
+                
+                for(NSOperation *previousExclusiveOp in previousMutuallyExclusiveOperations) {
+                    for(NSOperation *dependency in dependencies) {
+                        [dependency addDependency:previousExclusiveOp];
+                    }
+                    
+                    [opOperation addDependency:previousExclusiveOp];
+                }
+                
+                OPBlockObserver *blockObserver = [[OPBlockObserver alloc] initWithStartHandler:nil
+                                                                                produceHandler:nil
+                                                                                 finishHandler:^(OPOperation *anOperation, __unused NSArray *errors) {
+                                                                                     [exclusivityController removeOperation:anOperation categories:concurrencyCategories];
+                                                                                 }];
+                [opOperation addObserver:blockObserver];
+            }
+            
+            [self addOperations:dependencies waitUntilFinished:NO];
         }
 
         /**

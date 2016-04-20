@@ -21,46 +21,12 @@
 
 #import "OPOperation.h"
 #import "OPOperationCondition.h"
-#import "OPOperationConditionEvaluator.h"
 #import "OPOperationObserver.h"
-
-
-typedef NS_ENUM(NSUInteger, OPOperationState) {
-    /**
-     *  The initial state of an operation
-     */
-    OPOperationStateInitialized,
-    /**
-     *  The `OPOperation` is ready to begin evaluating conditions.
-     */
-    OPOperationStatePending,
-    /**
-     *  The `OPOperation` is evaluating conditions.
-     */
-    OPOperationStateEvaluatingConditions,
-    /**
-     *  The `OPOperation`'s conditions have all been satisfied, and it is ready
-     *  to execute.
-     */
-    OPOperationStateReady,
-    /**
-     *  The `OPOperation` is executing
-     */
-    OPOperationStateExecuting,
-    /**
-     *  Execution of the `OPOperation` has finished, but it has not yet notified
-     *  the queue of this.
-     */
-    OPOperationStateFinishing,
-    /**
-     *  The `OPOperation` has finished executing.
-     */
-    OPOperationStateFinished
-};
-
 
 @interface OPOperation()
 
+@property (nonatomic, getter = isFinished, readwrite)  BOOL finished;
+@property (nonatomic, getter = isExecuting, readwrite) BOOL executing;
 
 @property (strong, nonatomic, readwrite) NSMutableArray *conditions;
 
@@ -69,12 +35,6 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
  *  operation has finished.
  */
 @property (assign, nonatomic) BOOL hasFinishedAlready;
-
-/**
- *  A private property used to indicate the state of the operation.
- *  Property is KVO observable.
- */
-@property (assign, nonatomic) OPOperationState state;
 
 /**
  *  A private property used to store `NSError` objects in the event that
@@ -93,150 +53,69 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 
 
 @implementation OPOperation
-@synthesize state = _state;
+
+@synthesize executing = _executing;
+@synthesize finished = _finished;
 
 #pragma mark - Debugging
 #pragma mark -
 
-- (NSString *)debugDescription
-{
-    NSString *description = [super debugDescription];
-    NSString *state;
+- (NSString *)debugDescription {
+    NSString *stateString = @"Pending";
     
-    switch (self.state)
+    if([self isExecuting]) {
+        stateString = @"Executing";
+    }
+    else if([self isFinished]) {
+        stateString = @"Finished";
+    }
+    else if([self isReady])
     {
-        case OPOperationStateReady:
-            state = @"Ready";
-            break;
-            
-        case OPOperationStatePending:
-            state = @"Pending";
-            break;
-            
-        case OPOperationStateFinished:
-            state = @"Finished";
-            break;
-            
-        case OPOperationStateExecuting:
-            state = @"Executing";
-            break;
-            
-        case OPOperationStateFinishing:
-            state = @"Finishing";
-            break;
-            
-        case OPOperationStateInitialized:
-            state = @"Initialized";
-            break;
-            
-        case OPOperationStateEvaluatingConditions:
-            state = @"EvaluatingConditions";
-            break;
+        stateString = @"Ready";
     }
     
-    return [NSString stringWithFormat:@"%@ (%@)", description, state];
+    return [NSString stringWithFormat:@"%@ (%@)", [super debugDescription], stateString];
 }
-
-#pragma mark - KVO
-#pragma mark -
-
-+ (NSSet *)keyPathsForValuesAffectingIsReady
-{
-    return [NSSet setWithObject:NSStringFromSelector(@selector(state))];
-}
-
-+ (NSSet *)keyPathsForValuesAffectingIsExecuting
-{
-    return [NSSet setWithObject:NSStringFromSelector(@selector(state))];
-}
-
-+ (NSSet *)keyPathsForValuesAffectingIsFinished
-{
-    return [NSSet setWithObject:NSStringFromSelector(@selector(state))];
-}
-
 
 - (void)willEnqueue
 {
-    [self setState:OPOperationStatePending];
-}
-
-
-#pragma mark - State
-#pragma mark -
-
-- (OPOperationState)state
-{
-    @synchronized(self) {
-        return _state;
-    }
-}
-
-+ (BOOL)automaticallyNotifiesObserversOfState
-{
-    return NO;
-}
-
-- (void)setState:(OPOperationState)newState
-{
-    @synchronized(self) {
-        // Guard against calling if state is currently finished
-        if (_state != OPOperationStateFinished) {
-            NSAssert(_state != newState, @"Performing invalid cyclic state transition.");
-            [self willChangeValueForKey:@"state"];
-            _state = newState;
-            [self didChangeValueForKey:@"state"];
-        }
-    }
-}
-
-- (void)evaluateConditions
-{
-    NSAssert([self state] == OPOperationStatePending, @"evaluateConditions was called out-of-order");
-
-    [self setState:OPOperationStateEvaluatingConditions];
-
-    [OPOperationConditionEvaluator evaluateConditions:[self conditions] operation:self completion:^(NSArray *failures) {
-        [self.internalErrors addObjectsFromArray:failures];
-        [self setState:OPOperationStateReady];
-    }];
+    // no-op
 }
 
 
 #pragma mark - Overrides
 #pragma mark -
 
-- (BOOL)isReady
-{
-    switch ([self state]) {
-        case OPOperationStateInitialized:
-            return [self isCancelled];
-
-        case OPOperationStatePending:
-            if ([self isCancelled]) {
-                return YES;
-            }
-            if ([super isReady]) {
-                [self evaluateConditions];
-            }
-            return NO;
-
-        case OPOperationStateReady:
-            return [super isReady] || [self isCancelled];
-
-        default:
-            return NO;
+- (BOOL)isExecuting {
+    @synchronized(self) {
+        return _executing;
     }
 }
 
-- (BOOL)isExecuting
-{
-    return [self state] == OPOperationStateExecuting;
+- (BOOL)isFinished {
+    @synchronized(self) {
+        return _finished;
+    }
 }
 
-- (BOOL)isFinished
-{
-    return [self state] == OPOperationStateFinished;
+- (void)setExecuting:(BOOL)executing {
+    [self willChangeValueForKey:@"isExecuting"];
+    @synchronized(self) {
+        if (_executing != executing) {
+            _executing = executing;
+        }
+    }
+    [self didChangeValueForKey:@"isExecuting"];
+}
+
+- (void)setFinished:(BOOL)finished {
+    [self willChangeValueForKey:@"isFinished"];
+    @synchronized(self) {
+        if (_finished != finished) {
+            _finished = finished;
+        }
+    }
+    [self didChangeValueForKey:@"isFinished"];
 }
 
 
@@ -250,7 +129,7 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 
 - (void)setUserInitiated:(BOOL)userInitiated
 {
-    NSAssert([self state] < OPOperationStateExecuting, @"Cannot modify userInitiated after execution has begun.");
+    NSAssert(!self.isExecuting && !self.isFinished, @"Cannot modify userInitiated after execution has begun.");
     
     [self setQualityOfService:userInitiated ? NSOperationQualityOfServiceUserInitiated : NSOperationQualityOfServiceUtility];
 }
@@ -261,18 +140,17 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 
 - (void)addCondition:(id <OPOperationCondition>)condition
 {
-    NSAssert([self state] < OPOperationStateEvaluatingConditions, @"Cannot modify conditions after execution has begun.");
+    NSAssert(!self.isExecuting && !self.isFinished, @"Cannot modify conditions after execution has begun.");
 
     [self.conditions addObject:condition];
 }
-
 
 #pragma mark - Observers
 #pragma mark -
 
 - (void)addObserver:(id <OPOperationObserver>)observer
 {
-    NSAssert([self state] < OPOperationStateExecuting, @"Cannot modify observers after execution has begun.");
+    NSAssert(!self.isExecuting && !self.isFinished, @"Cannot modify observers after execution has begun.");
 
     [self.observers addObject:observer];
 }
@@ -280,7 +158,7 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 
 - (void)addDependency:(NSOperation *)operation
 {
-    NSAssert([self state] < OPOperationStateExecuting, @"Dependencies cannot be modified after execution has begun.");
+    NSAssert(!self.isExecuting && !self.isFinished, @"Dependencies cannot be modified after execution has begun.");
 
     [super addDependency:operation];
 }
@@ -291,23 +169,20 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 
 - (void)start
 {
-    // [NSOperation start]; contains important logic that shouldn't be bypassed.
-    [super start];
-
-    // If the operation has been cancelled, we still need to enter the "Finished" state.
     if ([self isCancelled]) {
-        [self finish];
+        self.finished = YES;
+        return;
     }
+    
+    self.executing = YES;
+    
+    [self main];
 }
 
 - (void)main
 {
-    NSAssert([self state] == OPOperationStateReady, @"This operation must be performed on an operation queue.");
-
     if ([self.internalErrors count] == 0 && ![self isCancelled]) {
-
-        [self setState:OPOperationStateExecuting];
-
+        
         for (id <OPOperationObserver>observer in [self observers]) {
             [observer operationDidStart:self];
         }
@@ -329,11 +204,7 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 - (void)cancel {
     [super cancel];
     
-    if([self isFinished]) {
-        return;
-    }
-    
-    if(self.state > OPOperationStateReady) {
+    if([self isExecuting] && ![self isFinished]) {
         [self finish];
     }
 }
@@ -372,7 +243,6 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
 {
     if (![self hasFinishedAlready]) {
         [self setHasFinishedAlready:YES];
-        [self setState:OPOperationStateFinishing];
 
         NSArray *combinedErrors = [self.internalErrors arrayByAddingObjectsFromArray:errors];
 
@@ -381,14 +251,20 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
         for (id <OPOperationObserver>observer in [self observers]) {
             [observer operation:self didFinishWithErrors:combinedErrors];
         }
-
-        [self setState:OPOperationStateFinished];
+        
+        self.executing = NO;
+        self.finished  = YES;
     }
 }
 
 - (void)finishedWithErrors:(NSArray *)errors
 {
     // No-op
+}
+
+- (void)finishedEvaluationWithErrors:(NSArray *)errors
+{
+    [self.internalErrors addObjectsFromArray:errors ?: @[]];
 }
 
 - (void)waitUntilFinished
@@ -406,13 +282,15 @@ typedef NS_ENUM(NSUInteger, OPOperationState) {
     if (!self) {
         return nil;
     }
+    
+    _executing = NO;
+    _finished = NO;
 
-    _state = OPOperationStateInitialized;
     _observers = [[NSMutableArray alloc] init];
     _conditions = [[NSMutableArray alloc] init];
 
     _internalErrors = [[NSMutableArray alloc] init];
-
+    
     return self;
 }
 
